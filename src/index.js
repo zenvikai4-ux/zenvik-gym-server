@@ -76,7 +76,7 @@ app.post('/diet/assigned', async (req, res) => {
     const DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
     // Group by day
-    const grouped: Record<number, string[]> = {};
+    const grouped = {};
     for (const p of plans) {
       if (!grouped[p.day_of_week]) grouped[p.day_of_week] = [];
       grouped[p.day_of_week].push(`${p.meal_slot}: ${p.items}`);
