@@ -120,7 +120,7 @@ app.post('/diet/assigned', async (req, res) => {
       .eq('client_profile_id', client_profile_id);
 
     console.log(`✅ Diet assignment WA sent to ${member.name} (${member.phone})`);
-  } catch (err: any) {
+  } catch (err) {
     console.error('Diet assignment endpoint error:', err.message);
   }
 });
