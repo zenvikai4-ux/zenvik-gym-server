@@ -30,9 +30,54 @@ app.post('/trigger/member-reminders', async (req, res) => {
 });
 
 /**
+ * Send diet plan using utility template
+ * Template: member_diet_plan
+ * {{1}} = member name, {{2}} = gym name, {{3}} = diet content
+ */
+async function sendDietTemplate(gym, phone, memberName, dietContent) {
+  if (!gym?.whatsapp_phone_id || !gym?.whatsapp_token) {
+    console.warn(`⚠️ No WA credentials for gym ${gym?.name}`);
+    return false;
+  }
+  try {
+    let e164 = phone.replace(/[\s\-()]/g, '');
+    if (!e164.startsWith('+')) e164 = '+91' + e164.replace(/^0/, '');
+    e164 = e164.replace('+', '');
+
+    const r = await fetch(`https://graph.facebook.com/v19.0/${gym.whatsapp_phone_id}/messages`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${gym.whatsapp_token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to: e164,
+        type: 'template',
+        template: {
+          name: 'member_diet_plan',
+          language: { code: 'en' },
+          components: [{
+            type: 'body',
+            parameters: [
+              { type: 'text', text: memberName },  // {{1}} member name
+              { type: 'text', text: gym.name },     // {{2}} gym name
+              { type: 'text', text: dietContent },  // {{3}} actual diet
+            ]
+          }]
+        }
+      })
+    });
+    const d = await r.json();
+    if (r.ok) { console.log(`✅ Diet WA sent to ${phone}`); return true; }
+    else { console.error(`❌ Diet WA failed to ${phone}:`, d.error?.message); return false; }
+  } catch (err) {
+    console.error('sendDietTemplate error:', err.message);
+    return false;
+  }
+}
+
+/**
  * POST /diet/assigned
  * Called from the app when a trainer saves/updates a diet plan.
- * Sends a WhatsApp message to the member with their new diet plan.
+ * Sends the actual diet content to the member via WhatsApp utility template.
  *
  * Body: { client_profile_id, gym_id }
  */
@@ -59,12 +104,14 @@ app.post('/diet/assigned', async (req, res) => {
 
     const member = cp.member;
 
-    // Get all diet plans for this member grouped by day
+    // Get today's diet plans for this member
+    const todayIdx = new Date().getDay() === 0 ? 6 : new Date().getDay() - 1;
+    const DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
     const { data: plans } = await supabase
       .from('diet_plans')
       .select('day_of_week, meal_slot, items')
       .eq('client_profile_id', client_profile_id)
-      .order('day_of_week')
       .order('meal_slot');
 
     if (!plans?.length) {
@@ -72,27 +119,21 @@ app.post('/diet/assigned', async (req, res) => {
       return;
     }
 
-    // Build a summary of the diet plan
-    const DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-
-    // Group by day
+    // Build diet content — today's meals if available, else full week
     const grouped = {};
     for (const p of plans) {
       if (!grouped[p.day_of_week]) grouped[p.day_of_week] = [];
-      grouped[p.day_of_week].push(`${p.meal_slot}: ${p.items}`);
+      grouped[p.day_of_week].push(`• ${p.meal_slot}: ${p.items}`);
     }
 
-    // Build message — show today's plan if exists, else show full week summary
-    const todayIdx = new Date().getDay() === 0 ? 6 : new Date().getDay() - 1;
-    let dietMsg = '';
-
+    let dietContent = '';
     if (grouped[todayIdx]) {
-      dietMsg = `Hi ${member.name}! Your trainer has updated your diet plan 🥗\n\nToday (${DAY_NAMES[todayIdx]}):\n${grouped[todayIdx].join(', ')}\n\nStay consistent and keep pushing! 💪`;
+      dietContent = `${DAY_NAMES[todayIdx]}:\n${grouped[todayIdx].join('\n')}`;
     } else {
-      const weekSummary = Object.entries(grouped)
+      // Show full week
+      dietContent = Object.entries(grouped)
         .map(([day, meals]) => `${DAY_NAMES[Number(day)]}: ${meals.join(', ')}`)
-        .join(' | ');
-      dietMsg = `Hi ${member.name}! Your trainer has assigned your diet plan 🥗\n\n${weekSummary}\n\nStay consistent and keep pushing! 💪`;
+        .join('\n');
     }
 
     // Get gym WA config
@@ -102,24 +143,24 @@ app.post('/diet/assigned', async (req, res) => {
       return;
     }
 
-    // Send WhatsApp
-    await sendTemplateMessage(gym, member.phone, member.name, dietMsg);
+    // Send via utility template
+    await sendDietTemplate(gym, member.phone, member.name, dietContent);
 
-    // Insert in-app notification
+    // In-app notification with actual diet content
     await insertMemberNotification(
       gym_id, member.id,
-      '🥗 Diet Plan Updated',
-      `Your trainer has updated your diet plan. Check the Diet section in your app.`,
+      '🥗 Your Diet Plan',
+      dietContent,
       'diet'
     );
 
-    // Update wa_sent_at on diet_plans for this member
+    // Update wa_sent_at
     await supabase
       .from('diet_plans')
       .update({ wa_sent_at: new Date().toISOString() })
       .eq('client_profile_id', client_profile_id);
 
-    console.log(`✅ Diet assignment WA sent to ${member.name} (${member.phone})`);
+    console.log(`✅ Diet WA sent to ${member.name} (${member.phone})`);
   } catch (err) {
     console.error('Diet assignment endpoint error:', err.message);
   }

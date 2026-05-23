@@ -49,7 +49,50 @@ async function sendTemplateMessage(gym, phone, memberName, message) {
   }
 }
 
-async function runMemberExpiryReminders() {
+async function sendExpiryReminderTemplate(gym, phone, memberName, expiryDate) {
+  if (!gym?.whatsapp_phone_id || !gym?.whatsapp_token) {
+    console.warn(`⚠️ No WA credentials for gym ${gym?.name} — skipping`);
+    return false;
+  }
+  try {
+    let e164 = phone.replace(/[\s\-()]/g, '');
+    if (!e164.startsWith('+')) e164 = '+91' + e164.replace(/^0/, '');
+    e164 = e164.replace('+', '');
+
+    const r = await fetch(`https://graph.facebook.com/v19.0/${gym.whatsapp_phone_id}/messages`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${gym.whatsapp_token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to: e164,
+        type: 'template',
+        template: {
+          name: 'gym_expiry_reminder',
+          language: { code: 'en' },
+          components: [{
+            type: 'body',
+            parameters: [
+              { type: 'text', text: memberName },  // {{1}} member name
+              { type: 'text', text: gym.name },    // {{2}} gym name
+              { type: 'text', text: expiryDate },  // {{3}} expiry date
+            ]
+          }]
+        }
+      })
+    });
+    const d = await r.json();
+    if (r.ok) {
+      console.log(`✅ Expiry reminder sent to ${phone}`);
+      return true;
+    } else {
+      console.error(`❌ Expiry reminder failed to ${phone}:`, d.error?.message);
+      return false;
+    }
+  } catch (e) {
+    console.error(`❌ Expiry reminder error to ${phone}:`, e.message);
+    return false;
+  }
+}
   console.log('⏰ Running member expiry reminders...');
   const today = new Date();
 
@@ -84,9 +127,8 @@ async function runMemberExpiryReminders() {
           `Hi ${member.name}, your ${member.plan} membership expires in 3 days. Contact your gym to renew.`,
           'fee_reminder'
         );
-        await sendTemplateMessage(
-          gym, member.phone, member.name,
-          `Your ${member.plan} membership expires in 3 days. Please renew to continue your fitness journey!`
+        await sendExpiryReminderTemplate(gym, member.phone, member.name,
+          new Date(member.expiry_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })
         );
       }
 
@@ -97,9 +139,8 @@ async function runMemberExpiryReminders() {
           `Hi ${member.name}, your ${member.plan} membership expires TOMORROW. Renew now to avoid interruption.`,
           'fee_reminder'
         );
-        await sendTemplateMessage(
-          gym, member.phone, member.name,
-          `Your ${member.plan} membership expires TOMORROW. Renew now to avoid interruption to your fitness routine!`
+        await sendExpiryReminderTemplate(gym, member.phone, member.name,
+          new Date(member.expiry_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })
         );
       }
 
@@ -110,9 +151,8 @@ async function runMemberExpiryReminders() {
           `Hi ${member.name}, your ${member.plan} membership expires TODAY. Renew now to continue!`,
           'fee_reminder'
         );
-        await sendTemplateMessage(
-          gym, member.phone, member.name,
-          `Your ${member.plan} membership is expiring TODAY. Please renew now to continue your fitness journey!`
+        await sendExpiryReminderTemplate(gym, member.phone, member.name,
+          new Date(member.expiry_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })
         );
       }
     }
