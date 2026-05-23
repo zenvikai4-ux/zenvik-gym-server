@@ -93,6 +93,8 @@ async function sendExpiryReminderTemplate(gym, phone, memberName, expiryDate) {
     return false;
   }
 }
+
+async function runMemberExpiryReminders() {
   console.log('⏰ Running member expiry reminders...');
   const today = new Date();
 
