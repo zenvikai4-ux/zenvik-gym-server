@@ -123,17 +123,16 @@ app.post('/diet/assigned', async (req, res) => {
     const grouped = {};
     for (const p of plans) {
       if (!grouped[p.day_of_week]) grouped[p.day_of_week] = [];
-      grouped[p.day_of_week].push(`• ${p.meal_slot}: ${p.items}`);
+      grouped[p.day_of_week].push(`${p.meal_slot}: ${p.items}`);
     }
 
     let dietContent = '';
     if (grouped[todayIdx]) {
-      dietContent = `${DAY_NAMES[todayIdx]}:\n${grouped[todayIdx].join('\n')}`;
+      dietContent = grouped[todayIdx].join('\n');
     } else {
-      // Show full week
       dietContent = Object.entries(grouped)
-        .map(([day, meals]) => `${DAY_NAMES[Number(day)]}: ${meals.join(', ')}`)
-        .join('\n');
+        .map(([day, meals]) => `${DAY_NAMES[Number(day)]}:\n${meals.join('\n')}`)
+        .join('\n\n');
     }
 
     // Get gym WA config
