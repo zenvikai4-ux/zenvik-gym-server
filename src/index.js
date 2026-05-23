@@ -135,23 +135,28 @@ app.post('/diet/assigned', async (req, res) => {
         .join('\n\n');
     }
 
-    // Get gym WA config
-    const gym = await getGymWhatsAppConfig(gym_id);
-    if (!gym) {
-      console.warn(`⚠️ No gym WA config for ${gym_id}`);
-      return;
-    }
+    // Get gym WA config and automation config
+    const [gym, automationConfig] = await Promise.all([
+      getGymWhatsAppConfig(gym_id),
+      supabase.from('gym_automation_config').select('diet_messages_enabled').eq('gym_id', gym_id).single().then(r => r.data),
+    ]);
 
-    // Send via utility template
-    await sendDietTemplate(gym, member.phone, member.name, dietContent);
-
-    // In-app notification with actual diet content
+    // Always send in-app notification
     await insertMemberNotification(
       gym_id, member.id,
       '🥗 Your Diet Plan',
       dietContent,
       'diet'
     );
+
+    // Only send WhatsApp if diet_messages_enabled is ON in automation config
+    if (gym && automationConfig?.diet_messages_enabled !== false) {
+      await sendDietTemplate(gym, member.phone, member.name, dietContent);
+    } else if (!gym) {
+      console.warn(`⚠️ No gym WA config for ${gym_id} — skipping WhatsApp`);
+    } else {
+      console.log(`ℹ️ Diet WhatsApp disabled for gym ${gym_id} — in-app only`);
+    }
 
     // Update wa_sent_at
     await supabase
@@ -162,6 +167,75 @@ app.post('/diet/assigned', async (req, res) => {
     console.log(`✅ Diet WA sent to ${member.name} (${member.phone})`);
   } catch (err) {
     console.error('Diet assignment endpoint error:', err.message);
+  }
+});
+
+/**
+ * POST /member/welcome
+ * Called when a new member is added to the gym.
+ * Sends a welcome WhatsApp message to the member.
+ * Body: { member_id, gym_id }
+ */
+app.post('/member/welcome', async (req, res) => {
+  const { member_id, gym_id } = req.body;
+  if (!member_id || !gym_id) {
+    return res.status(400).json({ error: 'member_id and gym_id are required' });
+  }
+  res.json({ message: 'Welcome message triggered' });
+
+  try {
+    const { data: member } = await supabase
+      .from('members')
+      .select('id, name, phone, plan, expiry_date')
+      .eq('id', member_id)
+      .single();
+
+    if (!member?.phone) {
+      console.warn(`⚠️ No phone for member ${member_id}`);
+      return;
+    }
+
+    const gym = await getGymWhatsAppConfig(gym_id);
+    if (!gym) {
+      console.warn(`⚠️ No gym WA config for ${gym_id}`);
+      return;
+    }
+
+    const expiryText = member.expiry_date
+      ? new Date(member.expiry_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })
+      : 'Not set';
+
+    const welcomeMsg = `Welcome to ${gym.name}, ${member.name}! 🎉\n\nYour membership details:\n• Plan: ${member.plan || 'Standard'}\n• Valid until: ${expiryText}\n\nWe're excited to have you on your fitness journey! 💪`;
+
+    // Send WhatsApp
+    const r = await fetch(`https://graph.facebook.com/v19.0/${gym.whatsapp_phone_id}/messages`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${gym.whatsapp_token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to: member.phone.replace(/\D/g, '').length === 10 ? '91' + member.phone.replace(/\D/g, '') : member.phone.replace(/\D/g, ''),
+        type: 'text',
+        text: { body: welcomeMsg },
+      })
+    });
+
+    if (r.ok) {
+      console.log(`✅ Welcome message sent to ${member.name}`);
+    } else {
+      const d = await r.json();
+      console.error(`❌ Welcome message failed:`, d.error?.message);
+    }
+
+    // In-app notification
+    await insertMemberNotification(
+      gym_id, member.id,
+      `🎉 Welcome to ${gym.name}!`,
+      `Your ${member.plan || 'Standard'} membership is active until ${expiryText}. Let's get started!`,
+      'general'
+    );
+
+  } catch (err) {
+    console.error('Welcome message error:', err.message);
   }
 });
 
