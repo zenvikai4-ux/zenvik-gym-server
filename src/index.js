@@ -4,6 +4,7 @@ const { startAllCrons } = require('./cron');
 const { sendTemplateMessage } = require('./cron');
 const supabase = require('./supabase');
 const { insertMemberNotification, getGymWhatsAppConfig } = require('./notifications');
+const { sendPushToGym, sendPushToMember } = require('./push');
 
 const app = express();
 app.use(express.json());
@@ -18,7 +19,7 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     timezone: 'Asia/Kolkata',
     jobs: ['member_expiry_9am', 'owner_subscription_9am'],
-    triggers: ['diet_on_assignment'],
+    triggers: ['diet_on_assignment', 'member_welcome', 'send_message'],
   });
 });
 
@@ -57,9 +58,9 @@ async function sendDietTemplate(gym, phone, memberName, dietContent) {
           components: [{
             type: 'body',
             parameters: [
-              { type: 'text', text: memberName },  // {{1}} member name
-              { type: 'text', text: gym.name },     // {{2}} gym name
-              { type: 'text', text: dietContent },  // {{3}} actual diet
+              { type: 'text', text: memberName },
+              { type: 'text', text: gym.name },
+              { type: 'text', text: dietContent },
             ]
           }]
         }
@@ -77,9 +78,6 @@ async function sendDietTemplate(gym, phone, memberName, dietContent) {
 /**
  * POST /diet/assigned
  * Called from the app when a trainer saves/updates a diet plan.
- * Sends the actual diet content to the member via WhatsApp utility template.
- *
- * Body: { client_profile_id, gym_id }
  */
 app.post('/diet/assigned', async (req, res) => {
   const { client_profile_id, gym_id } = req.body;
@@ -90,7 +88,6 @@ app.post('/diet/assigned', async (req, res) => {
   res.json({ message: 'Diet assignment notification triggered' });
 
   try {
-    // Get member info via client_profile
     const { data: cp } = await supabase
       .from('client_profiles')
       .select('id, gym_id, member:members(id, name, phone)')
@@ -103,8 +100,6 @@ app.post('/diet/assigned', async (req, res) => {
     }
 
     const member = cp.member;
-
-    // Get today's diet plans for this member
     const todayIdx = new Date().getDay() === 0 ? 6 : new Date().getDay() - 1;
     const DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
@@ -119,7 +114,6 @@ app.post('/diet/assigned', async (req, res) => {
       return;
     }
 
-    // Build diet content — today's meals if available, else full week
     const grouped = {};
     for (const p of plans) {
       if (!grouped[p.day_of_week]) grouped[p.day_of_week] = [];
@@ -135,21 +129,18 @@ app.post('/diet/assigned', async (req, res) => {
         .join('\n\n');
     }
 
-    // Get gym WA config and automation config
     const [gym, automationConfig] = await Promise.all([
       getGymWhatsAppConfig(gym_id),
       supabase.from('gym_automation_config').select('diet_messages_enabled').eq('gym_id', gym_id).single().then(r => r.data),
     ]);
 
     // Always send in-app notification
-    await insertMemberNotification(
-      gym_id, member.id,
-      '🥗 Your Diet Plan',
-      dietContent,
-      'diet'
-    );
+    await insertMemberNotification(gym_id, member.id, '🥗 Your Diet Plan', dietContent, 'diet');
 
-    // Only send WhatsApp if diet_messages_enabled is ON in automation config
+    // Send push notification to member
+    await sendPushToMember(member.id, '🥗 Diet Plan Updated', `Your trainer has updated your diet plan`).catch(() => {});
+
+    // Send WhatsApp only if diet_messages_enabled
     if (gym && automationConfig?.diet_messages_enabled !== false) {
       await sendDietTemplate(gym, member.phone, member.name, dietContent);
     } else if (!gym) {
@@ -158,13 +149,12 @@ app.post('/diet/assigned', async (req, res) => {
       console.log(`ℹ️ Diet WhatsApp disabled for gym ${gym_id} — in-app only`);
     }
 
-    // Update wa_sent_at
     await supabase
       .from('diet_plans')
       .update({ wa_sent_at: new Date().toISOString() })
       .eq('client_profile_id', client_profile_id);
 
-    console.log(`✅ Diet WA sent to ${member.name} (${member.phone})`);
+    console.log(`✅ Diet notification sent to ${member.name}`);
   } catch (err) {
     console.error('Diet assignment endpoint error:', err.message);
   }
@@ -173,8 +163,6 @@ app.post('/diet/assigned', async (req, res) => {
 /**
  * POST /member/welcome
  * Called when a new member is added to the gym.
- * Sends a welcome WhatsApp message to the member.
- * Body: { member_id, gym_id }
  */
 app.post('/member/welcome', async (req, res) => {
   const { member_id, gym_id } = req.body;
@@ -207,7 +195,6 @@ app.post('/member/welcome', async (req, res) => {
 
     const welcomeMsg = `Welcome to ${gym.name}, ${member.name}! 🎉\n\nYour membership details:\n• Plan: ${member.plan || 'Standard'}\n• Valid until: ${expiryText}\n\nWe're excited to have you on your fitness journey! 💪`;
 
-    // Send WhatsApp
     const r = await fetch(`https://graph.facebook.com/v19.0/${gym.whatsapp_phone_id}/messages`, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${gym.whatsapp_token}`, 'Content-Type': 'application/json' },
@@ -234,8 +221,70 @@ app.post('/member/welcome', async (req, res) => {
       'general'
     );
 
+    // Push notification
+    await sendPushToMember(member.id, `🎉 Welcome to ${gym.name}!`, `Your membership is active until ${expiryText}`).catch(() => {});
+
   } catch (err) {
     console.error('Welcome message error:', err.message);
+  }
+});
+
+/**
+ * POST /send-message
+ * Send a WhatsApp message from owner to any phone number (member, trainer, lead)
+ * Body: { phone, message, gym_id }
+ */
+app.post('/send-message', async (req, res) => {
+  const { phone, message, gym_id } = req.body;
+  if (!phone || !message || !gym_id) {
+    return res.status(400).json({ error: 'phone, message and gym_id are required' });
+  }
+
+  try {
+    const gym = await getGymWhatsAppConfig(gym_id);
+    if (!gym) {
+      return res.status(404).json({ error: 'Gym WhatsApp not configured' });
+    }
+
+    // Format phone to E.164
+    let e164 = phone.replace(/[\s\-()]/g, '');
+    if (!e164.startsWith('+')) e164 = '+91' + e164.replace(/^0/, '');
+    e164 = e164.replace('+', '');
+
+    const r = await fetch(`https://graph.facebook.com/v19.0/${gym.whatsapp_phone_id}/messages`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${gym.whatsapp_token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to: e164,
+        type: 'text',
+        text: { body: message },
+      }),
+    });
+
+    const d = await r.json();
+    if (!r.ok) {
+      console.error('Send message error:', d.error?.message);
+      return res.status(400).json({ error: d.error?.message || 'Failed to send' });
+    }
+
+    // Log in direct_messages table
+    const tenDigit = phone.replace(/\D/g, '').slice(-10);
+    await supabase.from('direct_messages').insert({
+      gym_id,
+      to_phone: tenDigit,
+      message,
+      direction: 'outbound',
+    }).catch(e => console.warn('direct_messages insert failed:', e.message));
+
+    console.log(`✅ Message sent to ${phone}`);
+    res.json({ success: true, message_id: d.messages?.[0]?.id });
+  } catch (err) {
+    console.error('send-message error:', err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
