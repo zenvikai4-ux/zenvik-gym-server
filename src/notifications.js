@@ -31,8 +31,8 @@ async function insertOwnerNotification(gymId, title, body, type = 'general') {
 }
 
 /**
- * Get gym's WhatsApp phone ID and token
- * Each gym has their own number added under your Meta account
+ * Get gym's WhatsApp config
+ * Falls back to central Zenvik credentials if gym doesn't have its own
  */
 async function getGymWhatsAppConfig(gymId) {
   const { data: gym } = await supabase
@@ -40,7 +40,15 @@ async function getGymWhatsAppConfig(gymId) {
     .select('name, whatsapp_number, whatsapp_phone_id, whatsapp_token, instagram_handle, auto_reply_message')
     .eq('id', gymId)
     .single();
-  return gym;
+
+  if (!gym) return null;
+
+  // Fall back to central Zenvik credentials if gym has none
+  return {
+    ...gym,
+    whatsapp_phone_id: gym.whatsapp_phone_id || process.env.ZENVIK_PHONE_ID,
+    whatsapp_token: gym.whatsapp_token || process.env.ZENVIK_WA_TOKEN,
+  };
 }
 
 /**
