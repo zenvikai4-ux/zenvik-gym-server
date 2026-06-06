@@ -1,7 +1,6 @@
 require('dotenv').config();
 const express = require('express');
-const { startAllCrons } = require('./cron');
-const { sendTemplateMessage } = require('./cron');
+const { startAllCrons, runMemberExpiryReminders, sendExpiryReminderTemplate } = require('./cron');
 const supabase = require('./supabase');
 const { insertMemberNotification, getGymWhatsAppConfig } = require('./notifications');
 const { sendPushToGym, sendPushToMember } = require('./push');
@@ -25,7 +24,6 @@ app.get('/health', (req, res) => {
 
 // Manual trigger for testing
 app.post('/trigger/member-reminders', async (req, res) => {
-  const { runMemberExpiryReminders } = require('./cron');
   res.json({ message: 'Member reminder check triggered — check logs' });
   runMemberExpiryReminders();
 });
@@ -284,6 +282,74 @@ app.post('/send-message', async (req, res) => {
     res.json({ success: true, message_id: d.messages?.[0]?.id });
   } catch (err) {
     console.error('send-message error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /broadcast
+ * Send WhatsApp broadcast to multiple phones using gym_broadcast template
+ * Body: { gym_id, message, phones: string[], sender_name }
+ */
+app.post('/broadcast', async (req, res) => {
+  const { gym_id, message, phones, sender_name } = req.body;
+  if (!gym_id || !message || !phones?.length) {
+    return res.status(400).json({ error: 'gym_id, message and phones are required' });
+  }
+
+  try {
+    const gym = await getGymWhatsAppConfig(gym_id);
+    if (!gym) {
+      return res.status(404).json({ error: 'Gym WhatsApp not configured' });
+    }
+
+    let sent = 0;
+    let failed = 0;
+
+    for (const phone of phones) {
+      try {
+        let e164 = phone.replace(/[\s\-()]/g, '');
+        if (!e164.startsWith('+')) e164 = '+91' + e164.replace(/^0/, '');
+        e164 = e164.replace('+', '');
+
+        const r = await fetch(`https://graph.facebook.com/v19.0/${gym.whatsapp_phone_id}/messages`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${gym.whatsapp_token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            messaging_product: 'whatsapp',
+            to: e164,
+            type: 'template',
+            template: {
+              name: 'gym_broadcast',
+              language: { code: 'en' },
+              components: [{
+                type: 'body',
+                parameters: [
+                  { type: 'text', text: sender_name || gym.name },
+                  { type: 'text', text: message },
+                  { type: 'text', text: gym.name },
+                ]
+              }]
+            }
+          }),
+        });
+
+        if (r.ok) { sent++; }
+        else {
+          const d = await r.json();
+          console.error(`❌ Broadcast failed to ${phone}:`, d.error?.message);
+          failed++;
+        }
+      } catch (e) {
+        console.error(`❌ Broadcast error to ${phone}:`, e.message);
+        failed++;
+      }
+    }
+
+    console.log(`✅ Broadcast: ${sent} sent, ${failed} failed`);
+    res.json({ success: true, sent, failed, total: phones.length });
+  } catch (err) {
+    console.error('Broadcast error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
