@@ -271,12 +271,16 @@ app.post('/send-message', async (req, res) => {
 
     // Log in direct_messages table
     const tenDigit = phone.replace(/\D/g, '').slice(-10);
-    await supabase.from('direct_messages').insert({
-      gym_id,
-      to_phone: tenDigit,
-      message,
-      direction: 'outbound',
-    }).catch(e => console.warn('direct_messages insert failed:', e.message));
+    try {
+      await supabase.from('direct_messages').insert({
+        gym_id,
+        to_phone: tenDigit,
+        message,
+        direction: 'outbound',
+      });
+    } catch (e) {
+      console.warn('direct_messages insert failed:', e.message);
+    }
 
     console.log(`✅ Message sent to ${phone}`);
     res.json({ success: true, message_id: d.messages?.[0]?.id });
