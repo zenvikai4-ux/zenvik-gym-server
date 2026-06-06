@@ -226,9 +226,11 @@ async function runOwnerSubscriptionRemindersForGyms(gymIds) {
 function scheduleMinuteCron() {
   cron.schedule('* * * * *', async () => {
     try {
+      // Get current IST time explicitly
       const now = new Date();
-      const HH = String(now.getHours()).padStart(2, '0');
-      const MM = String(now.getMinutes()).padStart(2, '0');
+      const istTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+      const HH = String(istTime.getHours()).padStart(2, '0');
+      const MM = String(istTime.getMinutes()).padStart(2, '0');
       const currentTime = `${HH}:${MM}`;
 
       const { data: configs } = await supabase
