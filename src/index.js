@@ -10,6 +10,10 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3001;
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({
@@ -66,7 +70,7 @@ async function sendDietTemplate(gym, phone, memberName, dietContent) {
     });
     const d = await r.json();
     if (r.ok) { console.log(`✅ Diet WA sent to ${phone}`); return true; }
-    else { console.error(`❌ Diet WA failed to ${phone}:`, d.error?.message); return false; }
+    else { console.error(`❌ Diet WA failed to ${phone}:`, JSON.stringify(d.error)); return false; }
   } catch (err) {
     console.error('sendDietTemplate error:', err.message);
     return false;
@@ -208,7 +212,7 @@ app.post('/member/welcome', async (req, res) => {
       console.log(`✅ Welcome message sent to ${member.name}`);
     } else {
       const d = await r.json();
-      console.error(`❌ Welcome message failed:`, d.error?.message);
+      console.error(`❌ Welcome message failed:`, JSON.stringify(d.error));
     }
 
     // In-app notification
@@ -265,8 +269,18 @@ app.post('/send-message', async (req, res) => {
 
     const d = await r.json();
     if (!r.ok) {
-      console.error('Send message error:', d.error?.message);
-      return res.status(400).json({ error: d.error?.message || 'Failed to send' });
+      const metaMsg = d.error?.message || 'Failed to send';
+      const metaCode = d.error?.code;
+      console.error('Send message error:', metaCode, metaMsg);
+      // Common 24-hour window error from Meta has code 131047 / 470
+      const isWindowError = metaCode === 131047 || metaCode === 470 ||
+        /24.?hour|re-?engagement|outside.*window/i.test(metaMsg);
+      return res.status(400).json({
+        error: isWindowError
+          ? 'This person has not messaged you in the last 24 hours, so WhatsApp blocks free-form replies. Ask them to send any message first.'
+          : metaMsg,
+        meta_code: metaCode,
+      });
     }
 
     // Log in direct_messages table
@@ -299,6 +313,9 @@ app.post('/send-message', async (req, res) => {
  * "sender_name" reused for everyone (that was the "Dear Sharukh for
  * everyone" bug).
  *
+ * A small delay is added between each send to avoid tripping Meta's
+ * per-second rate limit when broadcasting to many recipients at once.
+ *
  * Body: { gym_id, message, recipients: { name: string, phone: string }[] }
  */
 app.post('/broadcast', async (req, res) => {
@@ -315,8 +332,11 @@ app.post('/broadcast', async (req, res) => {
 
     let sent = 0;
     let failed = 0;
+    const failures = [];
+    const BROADCAST_DELAY_MS = 250; // throttle to stay well under Meta's burst rate limit
 
-    for (const recipient of recipients) {
+    for (let i = 0; i < recipients.length; i++) {
+      const recipient = recipients[i];
       const name = recipient?.name;
       const phone = recipient?.phone;
       if (!phone) { failed++; continue; }
@@ -348,20 +368,33 @@ app.post('/broadcast', async (req, res) => {
           }),
         });
 
-        if (r.ok) { sent++; }
-        else {
+        if (r.ok) {
+          sent++;
+        } else {
           const d = await r.json();
-          console.error(`❌ Broadcast failed to ${phone} (${name}):`, d.error?.message);
+          const metaMsg = d.error?.message || 'unknown error';
+          const metaCode = d.error?.code;
+          console.error(`❌ Broadcast failed to ${phone} (${name}): [${metaCode}] ${metaMsg}`);
           failed++;
+          failures.push({ phone, name, error: metaMsg, code: metaCode });
         }
       } catch (e) {
         console.error(`❌ Broadcast error to ${phone} (${name}):`, e.message);
         failed++;
+        failures.push({ phone, name, error: e.message });
+      }
+
+      // Throttle between sends — skip delay after the very last recipient
+      if (i < recipients.length - 1) {
+        await sleep(BROADCAST_DELAY_MS);
       }
     }
 
     console.log(`✅ Broadcast: ${sent} sent, ${failed} failed`);
-    res.json({ success: true, sent, failed, total: recipients.length });
+    if (failures.length) {
+      console.log('Broadcast failures detail:', JSON.stringify(failures));
+    }
+    res.json({ success: true, sent, failed, total: recipients.length, failures });
   } catch (err) {
     console.error('Broadcast error:', err.message);
     res.status(500).json({ error: err.message });
