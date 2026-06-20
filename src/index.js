@@ -292,13 +292,19 @@ app.post('/send-message', async (req, res) => {
 
 /**
  * POST /broadcast
- * Send WhatsApp broadcast to multiple phones using gym_broadcast template
- * Body: { gym_id, message, phones: string[], sender_name }
+ * Send WhatsApp broadcast to multiple recipients using gym_broadcast template.
+ *
+ * IMPORTANT: {{1}} in the approved template is the RECIPIENT's own name —
+ * each person must get their own name filled in, never a single shared
+ * "sender_name" reused for everyone (that was the "Dear Sharukh for
+ * everyone" bug).
+ *
+ * Body: { gym_id, message, recipients: { name: string, phone: string }[] }
  */
 app.post('/broadcast', async (req, res) => {
-  const { gym_id, message, phones, sender_name } = req.body;
-  if (!gym_id || !message || !phones?.length) {
-    return res.status(400).json({ error: 'gym_id, message and phones are required' });
+  const { gym_id, message, recipients } = req.body;
+  if (!gym_id || !message || !recipients?.length) {
+    return res.status(400).json({ error: 'gym_id, message and recipients are required' });
   }
 
   try {
@@ -310,7 +316,11 @@ app.post('/broadcast', async (req, res) => {
     let sent = 0;
     let failed = 0;
 
-    for (const phone of phones) {
+    for (const recipient of recipients) {
+      const name = recipient?.name;
+      const phone = recipient?.phone;
+      if (!phone) { failed++; continue; }
+
       try {
         let e164 = phone.replace(/[\s\-()]/g, '');
         if (!e164.startsWith('+')) e164 = '+91' + e164.replace(/^0/, '');
@@ -329,9 +339,9 @@ app.post('/broadcast', async (req, res) => {
               components: [{
                 type: 'body',
                 parameters: [
-                  { type: 'text', text: sender_name || gym.name },
-                  { type: 'text', text: message },
-                  { type: 'text', text: gym.name },
+                  { type: 'text', text: name || 'Member' }, // {{1}} = THIS recipient's own name
+                  { type: 'text', text: message },           // {{2}} = broadcast message
+                  { type: 'text', text: gym.name },           // {{3}} = gym name
                 ]
               }]
             }
@@ -341,17 +351,17 @@ app.post('/broadcast', async (req, res) => {
         if (r.ok) { sent++; }
         else {
           const d = await r.json();
-          console.error(`❌ Broadcast failed to ${phone}:`, d.error?.message);
+          console.error(`❌ Broadcast failed to ${phone} (${name}):`, d.error?.message);
           failed++;
         }
       } catch (e) {
-        console.error(`❌ Broadcast error to ${phone}:`, e.message);
+        console.error(`❌ Broadcast error to ${phone} (${name}):`, e.message);
         failed++;
       }
     }
 
     console.log(`✅ Broadcast: ${sent} sent, ${failed} failed`);
-    res.json({ success: true, sent, failed, total: phones.length });
+    res.json({ success: true, sent, failed, total: recipients.length });
   } catch (err) {
     console.error('Broadcast error:', err.message);
     res.status(500).json({ error: err.message });
