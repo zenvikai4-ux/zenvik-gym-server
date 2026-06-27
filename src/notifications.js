@@ -1,10 +1,11 @@
 const supabase = require('./supabase');
 const { sendWhatsAppMessage } = require('./whatsapp');
 
-// The gym's dedicated WhatsApp number phone ID
-// This is used as fallback for gyms that don't have their own number configured
+// The gym's dedicated WhatsApp number credentials
+// Hardcoded as fallback so messages always go from the right number
+// regardless of Railway env var configuration.
 const GYM_PHONE_ID = process.env.GYM_PHONE_ID || '1051544281382053';
-const GYM_WA_TOKEN = process.env.GYM_WA_TOKEN || process.env.ZENVIK_WA_TOKEN;
+const GYM_WA_TOKEN = process.env.GYM_WA_TOKEN || process.env.ZENVIK_WA_TOKEN || '';
 
 /**
  * Insert in-app notification for a member
