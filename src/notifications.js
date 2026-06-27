@@ -1,6 +1,11 @@
 const supabase = require('./supabase');
 const { sendWhatsAppMessage } = require('./whatsapp');
 
+// The gym's dedicated WhatsApp number phone ID
+// This is used as fallback for gyms that don't have their own number configured
+const GYM_PHONE_ID = process.env.GYM_PHONE_ID || '1051544281382053';
+const GYM_WA_TOKEN = process.env.GYM_WA_TOKEN || process.env.ZENVIK_WA_TOKEN;
+
 /**
  * Insert in-app notification for a member
  */
@@ -17,7 +22,7 @@ async function insertMemberNotification(gymId, memberId, title, body, type = 'ge
 }
 
 /**
- * Insert in-app notification for gym owner (via their profile)
+ * Insert in-app notification for gym owner
  */
 async function insertOwnerNotification(gymId, title, body, type = 'general') {
   const { error } = await supabase.from('notifications').insert({
@@ -31,8 +36,10 @@ async function insertOwnerNotification(gymId, title, body, type = 'general') {
 }
 
 /**
- * Get gym's WhatsApp config
- * Falls back to central Zenvik credentials if gym doesn't have its own
+ * Get gym's WhatsApp config.
+ * Uses gym's own credentials if configured, otherwise falls back to the
+ * central gym WhatsApp number (GYM_PHONE_ID / GYM_WA_TOKEN env vars).
+ * NOTE: GYM_PHONE_ID is the gym number (9059...), NOT the Zenvik website number.
  */
 async function getGymWhatsAppConfig(gymId) {
   const { data: gym } = await supabase
@@ -43,11 +50,10 @@ async function getGymWhatsAppConfig(gymId) {
 
   if (!gym) return null;
 
-  // Fall back to central Zenvik credentials if gym has none
   return {
     ...gym,
-    whatsapp_phone_id: gym.whatsapp_phone_id || process.env.ZENVIK_PHONE_ID,
-    whatsapp_token: gym.whatsapp_token || process.env.ZENVIK_WA_TOKEN,
+    whatsapp_phone_id: gym.whatsapp_phone_id || GYM_PHONE_ID,
+    whatsapp_token: gym.whatsapp_token || GYM_WA_TOKEN,
   };
 }
 
@@ -56,7 +62,6 @@ async function getGymWhatsAppConfig(gymId) {
  */
 async function sendMemberWhatsApp(gym, memberPhone, message) {
   if (!gym?.whatsapp_phone_id || !gym?.whatsapp_token || !memberPhone) return;
-  // Format phone: remove spaces, +, etc → e.g. 919876543210
   const phone = memberPhone.replace(/[^0-9]/g, '');
   if (phone.length < 10) return;
   const formatted = phone.startsWith('91') ? phone : `91${phone}`;
