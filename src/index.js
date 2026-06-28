@@ -1,14 +1,18 @@
 require('dotenv').config();
 const express = require('express');
-const { startAllCrons } = require('./cron');
-const { sendTemplateMessage } = require('./cron');
+const { startAllCrons, runMemberExpiryReminders, sendExpiryReminderTemplate } = require('./cron');
 const supabase = require('./supabase');
 const { insertMemberNotification, getGymWhatsAppConfig } = require('./notifications');
+const { sendPushToGym, sendPushToMember } = require('./push');
 
 const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3001;
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 // Health check
 app.get('/health', (req, res) => {
@@ -18,13 +22,12 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     timezone: 'Asia/Kolkata',
     jobs: ['member_expiry_9am', 'owner_subscription_9am'],
-    triggers: ['diet_on_assignment'],
+    triggers: ['diet_on_assignment', 'member_welcome', 'send_message'],
   });
 });
 
 // Manual trigger for testing
 app.post('/trigger/member-reminders', async (req, res) => {
-  const { runMemberExpiryReminders } = require('./cron');
   res.json({ message: 'Member reminder check triggered — check logs' });
   runMemberExpiryReminders();
 });
@@ -57,9 +60,9 @@ async function sendDietTemplate(gym, phone, memberName, dietContent) {
           components: [{
             type: 'body',
             parameters: [
-              { type: 'text', text: memberName },  // {{1}} member name
-              { type: 'text', text: gym.name },     // {{2}} gym name
-              { type: 'text', text: dietContent },  // {{3}} actual diet
+              { type: 'text', text: memberName },
+              { type: 'text', text: gym.name },
+              { type: 'text', text: dietContent },
             ]
           }]
         }
@@ -67,7 +70,7 @@ async function sendDietTemplate(gym, phone, memberName, dietContent) {
     });
     const d = await r.json();
     if (r.ok) { console.log(`✅ Diet WA sent to ${phone}`); return true; }
-    else { console.error(`❌ Diet WA failed to ${phone}:`, d.error?.message); return false; }
+    else { console.error(`❌ Diet WA failed to ${phone}:`, JSON.stringify(d.error)); return false; }
   } catch (err) {
     console.error('sendDietTemplate error:', err.message);
     return false;
@@ -77,9 +80,6 @@ async function sendDietTemplate(gym, phone, memberName, dietContent) {
 /**
  * POST /diet/assigned
  * Called from the app when a trainer saves/updates a diet plan.
- * Sends the actual diet content to the member via WhatsApp utility template.
- *
- * Body: { client_profile_id, gym_id }
  */
 app.post('/diet/assigned', async (req, res) => {
   const { client_profile_id, gym_id } = req.body;
@@ -90,7 +90,6 @@ app.post('/diet/assigned', async (req, res) => {
   res.json({ message: 'Diet assignment notification triggered' });
 
   try {
-    // Get member info via client_profile
     const { data: cp } = await supabase
       .from('client_profiles')
       .select('id, gym_id, member:members(id, name, phone)')
@@ -103,8 +102,6 @@ app.post('/diet/assigned', async (req, res) => {
     }
 
     const member = cp.member;
-
-    // Get today's diet plans for this member
     const todayIdx = new Date().getDay() === 0 ? 6 : new Date().getDay() - 1;
     const DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
@@ -119,7 +116,6 @@ app.post('/diet/assigned', async (req, res) => {
       return;
     }
 
-    // Build diet content — today's meals if available, else full week
     const grouped = {};
     for (const p of plans) {
       if (!grouped[p.day_of_week]) grouped[p.day_of_week] = [];
@@ -135,21 +131,18 @@ app.post('/diet/assigned', async (req, res) => {
         .join('\n\n');
     }
 
-    // Get gym WA config and automation config
     const [gym, automationConfig] = await Promise.all([
       getGymWhatsAppConfig(gym_id),
       supabase.from('gym_automation_config').select('diet_messages_enabled').eq('gym_id', gym_id).single().then(r => r.data),
     ]);
 
     // Always send in-app notification
-    await insertMemberNotification(
-      gym_id, member.id,
-      '🥗 Your Diet Plan',
-      dietContent,
-      'diet'
-    );
+    await insertMemberNotification(gym_id, member.id, '🥗 Your Diet Plan', dietContent, 'diet');
 
-    // Only send WhatsApp if diet_messages_enabled is ON in automation config
+    // Send push notification to member
+    await sendPushToMember(member.id, '🥗 Diet Plan Updated', `Your trainer has updated your diet plan`).catch(() => {});
+
+    // Send WhatsApp only if diet_messages_enabled
     if (gym && automationConfig?.diet_messages_enabled !== false) {
       await sendDietTemplate(gym, member.phone, member.name, dietContent);
     } else if (!gym) {
@@ -158,13 +151,12 @@ app.post('/diet/assigned', async (req, res) => {
       console.log(`ℹ️ Diet WhatsApp disabled for gym ${gym_id} — in-app only`);
     }
 
-    // Update wa_sent_at
     await supabase
       .from('diet_plans')
       .update({ wa_sent_at: new Date().toISOString() })
       .eq('client_profile_id', client_profile_id);
 
-    console.log(`✅ Diet WA sent to ${member.name} (${member.phone})`);
+    console.log(`✅ Diet notification sent to ${member.name}`);
   } catch (err) {
     console.error('Diet assignment endpoint error:', err.message);
   }
@@ -173,8 +165,6 @@ app.post('/diet/assigned', async (req, res) => {
 /**
  * POST /member/welcome
  * Called when a new member is added to the gym.
- * Sends a welcome WhatsApp message to the member.
- * Body: { member_id, gym_id }
  */
 app.post('/member/welcome', async (req, res) => {
   const { member_id, gym_id } = req.body;
@@ -207,7 +197,6 @@ app.post('/member/welcome', async (req, res) => {
 
     const welcomeMsg = `Welcome to ${gym.name}, ${member.name}! 🎉\n\nYour membership details:\n• Plan: ${member.plan || 'Standard'}\n• Valid until: ${expiryText}\n\nWe're excited to have you on your fitness journey! 💪`;
 
-    // Send WhatsApp
     const r = await fetch(`https://graph.facebook.com/v19.0/${gym.whatsapp_phone_id}/messages`, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${gym.whatsapp_token}`, 'Content-Type': 'application/json' },
@@ -223,7 +212,7 @@ app.post('/member/welcome', async (req, res) => {
       console.log(`✅ Welcome message sent to ${member.name}`);
     } else {
       const d = await r.json();
-      console.error(`❌ Welcome message failed:`, d.error?.message);
+      console.error(`❌ Welcome message failed:`, JSON.stringify(d.error));
     }
 
     // In-app notification
@@ -234,8 +223,181 @@ app.post('/member/welcome', async (req, res) => {
       'general'
     );
 
+    // Push notification
+    await sendPushToMember(member.id, `🎉 Welcome to ${gym.name}!`, `Your membership is active until ${expiryText}`).catch(() => {});
+
   } catch (err) {
     console.error('Welcome message error:', err.message);
+  }
+});
+
+/**
+ * POST /send-message
+ * Send a WhatsApp message from owner to any phone number (member, trainer, lead)
+ * Body: { phone, message, gym_id }
+ */
+app.post('/send-message', async (req, res) => {
+  const { phone, message, gym_id } = req.body;
+  if (!phone || !message || !gym_id) {
+    return res.status(400).json({ error: 'phone, message and gym_id are required' });
+  }
+
+  try {
+    const gym = await getGymWhatsAppConfig(gym_id);
+    if (!gym) {
+      return res.status(404).json({ error: 'Gym WhatsApp not configured' });
+    }
+
+    // Format phone to E.164
+    let e164 = phone.replace(/[\s\-()]/g, '');
+    if (!e164.startsWith('+')) e164 = '+91' + e164.replace(/^0/, '');
+    e164 = e164.replace('+', '');
+
+    const r = await fetch(`https://graph.facebook.com/v19.0/${gym.whatsapp_phone_id}/messages`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${gym.whatsapp_token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to: e164,
+        type: 'text',
+        text: { body: message },
+      }),
+    });
+
+    const d = await r.json();
+    if (!r.ok) {
+      const metaMsg = d.error?.message || 'Failed to send';
+      const metaCode = d.error?.code;
+      console.error('Send message error:', metaCode, metaMsg);
+      // Common 24-hour window error from Meta has code 131047 / 470
+      const isWindowError = metaCode === 131047 || metaCode === 470 ||
+        /24.?hour|re-?engagement|outside.*window/i.test(metaMsg);
+      return res.status(400).json({
+        error: isWindowError
+          ? 'This person has not messaged you in the last 24 hours, so WhatsApp blocks free-form replies. Ask them to send any message first.'
+          : metaMsg,
+        meta_code: metaCode,
+      });
+    }
+
+    // Log in direct_messages table
+    const tenDigit = phone.replace(/\D/g, '').slice(-10);
+    try {
+      await supabase.from('direct_messages').insert({
+        gym_id,
+        to_phone: tenDigit,
+        message,
+        direction: 'outbound',
+      });
+    } catch (e) {
+      console.warn('direct_messages insert failed:', e.message);
+    }
+
+    console.log(`✅ Message sent to ${phone}`);
+    res.json({ success: true, message_id: d.messages?.[0]?.id });
+  } catch (err) {
+    console.error('send-message error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /broadcast
+ * Send WhatsApp broadcast to multiple recipients using gym_broadcast template.
+ *
+ * IMPORTANT: {{1}} in the approved template is the RECIPIENT's own name —
+ * each person must get their own name filled in, never a single shared
+ * "sender_name" reused for everyone (that was the "Dear Sharukh for
+ * everyone" bug).
+ *
+ * A small delay is added between each send to avoid tripping Meta's
+ * per-second rate limit when broadcasting to many recipients at once.
+ *
+ * Body: { gym_id, message, recipients: { name: string, phone: string }[] }
+ */
+app.post('/broadcast', async (req, res) => {
+  const { gym_id, message, recipients } = req.body;
+  if (!gym_id || !message || !recipients?.length) {
+    return res.status(400).json({ error: 'gym_id, message and recipients are required' });
+  }
+
+  try {
+    const gym = await getGymWhatsAppConfig(gym_id);
+    if (!gym) {
+      return res.status(404).json({ error: 'Gym WhatsApp not configured' });
+    }
+
+    let sent = 0;
+    let failed = 0;
+    const failures = [];
+    const BROADCAST_DELAY_MS = 250; // throttle to stay well under Meta's burst rate limit
+
+    for (let i = 0; i < recipients.length; i++) {
+      const recipient = recipients[i];
+      const name = recipient?.name;
+      const phone = recipient?.phone;
+      if (!phone) { failed++; continue; }
+
+      try {
+        let e164 = phone.replace(/[\s\-()]/g, '');
+        if (!e164.startsWith('+')) e164 = '+91' + e164.replace(/^0/, '');
+        e164 = e164.replace('+', '');
+
+        const r = await fetch(`https://graph.facebook.com/v19.0/${gym.whatsapp_phone_id}/messages`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${gym.whatsapp_token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            messaging_product: 'whatsapp',
+            to: e164,
+            type: 'template',
+            template: {
+              name: 'gym_broadcast',
+              language: { code: 'en' },
+              components: [{
+                type: 'body',
+                parameters: [
+                  { type: 'text', text: name || 'Member' }, // {{1}} = THIS recipient's own name
+                  { type: 'text', text: message },           // {{2}} = broadcast message
+                  { type: 'text', text: gym.name },           // {{3}} = gym name
+                ]
+              }]
+            }
+          }),
+        });
+
+        if (r.ok) {
+          sent++;
+        } else {
+          const d = await r.json();
+          const metaMsg = d.error?.message || 'unknown error';
+          const metaCode = d.error?.code;
+          console.error(`❌ Broadcast failed to ${phone} (${name}): [${metaCode}] ${metaMsg}`);
+          failed++;
+          failures.push({ phone, name, error: metaMsg, code: metaCode });
+        }
+      } catch (e) {
+        console.error(`❌ Broadcast error to ${phone} (${name}):`, e.message);
+        failed++;
+        failures.push({ phone, name, error: e.message });
+      }
+
+      // Throttle between sends — skip delay after the very last recipient
+      if (i < recipients.length - 1) {
+        await sleep(BROADCAST_DELAY_MS);
+      }
+    }
+
+    console.log(`✅ Broadcast: ${sent} sent, ${failed} failed`);
+    if (failures.length) {
+      console.log('Broadcast failures detail:', JSON.stringify(failures));
+    }
+    res.json({ success: true, sent, failed, total: recipients.length, failures });
+  } catch (err) {
+    console.error('Broadcast error:', err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 

@@ -1,6 +1,12 @@
 const supabase = require('./supabase');
 const { sendWhatsAppMessage } = require('./whatsapp');
 
+// The gym's dedicated WhatsApp number credentials
+// Hardcoded as fallback so messages always go from the right number
+// regardless of Railway env var configuration.
+const GYM_PHONE_ID = process.env.GYM_PHONE_ID || '1051544281382053';
+const GYM_WA_TOKEN = process.env.GYM_WA_TOKEN || process.env.ZENVIK_WA_TOKEN || '';
+
 /**
  * Insert in-app notification for a member
  */
@@ -17,7 +23,7 @@ async function insertMemberNotification(gymId, memberId, title, body, type = 'ge
 }
 
 /**
- * Insert in-app notification for gym owner (via their profile)
+ * Insert in-app notification for gym owner
  */
 async function insertOwnerNotification(gymId, title, body, type = 'general') {
   const { error } = await supabase.from('notifications').insert({
@@ -31,8 +37,10 @@ async function insertOwnerNotification(gymId, title, body, type = 'general') {
 }
 
 /**
- * Get gym's WhatsApp phone ID and token
- * Each gym has their own number added under your Meta account
+ * Get gym's WhatsApp config.
+ * Uses gym's own credentials if configured, otherwise falls back to the
+ * central gym WhatsApp number (GYM_PHONE_ID / GYM_WA_TOKEN env vars).
+ * NOTE: GYM_PHONE_ID is the gym number (9059...), NOT the Zenvik website number.
  */
 async function getGymWhatsAppConfig(gymId) {
   const { data: gym } = await supabase
@@ -40,7 +48,14 @@ async function getGymWhatsAppConfig(gymId) {
     .select('name, whatsapp_number, whatsapp_phone_id, whatsapp_token, instagram_handle, auto_reply_message')
     .eq('id', gymId)
     .single();
-  return gym;
+
+  if (!gym) return null;
+
+  return {
+    ...gym,
+    whatsapp_phone_id: gym.whatsapp_phone_id || GYM_PHONE_ID,
+    whatsapp_token: gym.whatsapp_token || GYM_WA_TOKEN,
+  };
 }
 
 /**
@@ -48,7 +63,6 @@ async function getGymWhatsAppConfig(gymId) {
  */
 async function sendMemberWhatsApp(gym, memberPhone, message) {
   if (!gym?.whatsapp_phone_id || !gym?.whatsapp_token || !memberPhone) return;
-  // Format phone: remove spaces, +, etc → e.g. 919876543210
   const phone = memberPhone.replace(/[^0-9]/g, '');
   if (phone.length < 10) return;
   const formatted = phone.startsWith('91') ? phone : `91${phone}`;
