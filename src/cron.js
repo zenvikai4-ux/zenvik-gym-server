@@ -5,13 +5,9 @@ const { insertMemberNotification, insertOwnerNotification, getGymWhatsAppConfig 
 const { sendPushToMember, sendPushToGym } = require('./push');
 
 // ── Send expiry reminder via approved gym_expiry_reminder template ────────
-// NOTE: gym is already resolved through getGymWhatsAppConfig() before this
-// is called, which itself falls back to GYM_PHONE_ID / GYM_WA_TOKEN (the
-// gym's own dedicated number), never the website number. Do not add a
-// ZENVIK_PHONE_ID fallback here — that was the exact "wrong number" bug.
 async function sendExpiryReminderTemplate(gym, phone, memberName, expiryDate) {
-  const phoneId = gym?.whatsapp_phone_id;
-  const token   = gym?.whatsapp_token;
+  const phoneId = gym?.whatsapp_phone_id || process.env.ZENVIK_PHONE_ID;
+  const token   = gym?.whatsapp_token   || process.env.ZENVIK_WA_TOKEN;
   if (!phoneId || !token) {
     console.warn(`⚠️ No WA credentials for gym ${gym?.name} — skipping`);
     return false;
@@ -142,8 +138,8 @@ async function runDietMessagesForGyms(gymIds) {
       const gym = await getGymWhatsAppConfig(member.gym_id);
       await insertMemberNotification(member.gym_id, member.id, '🥗 Your Diet Plan for Today', dietContent, 'diet');
       if (gym && member.phone) {
-        const phoneId = gym.whatsapp_phone_id;
-        const token = gym.whatsapp_token;
+        const phoneId = gym.whatsapp_phone_id || process.env.ZENVIK_PHONE_ID;
+        const token = gym.whatsapp_token || process.env.ZENVIK_WA_TOKEN;
         if (phoneId && token) {
           let e164 = member.phone.replace(/[\s\-()]/g, '');
           if (!e164.startsWith('+')) e164 = '+91' + e164.replace(/^0/, '');
